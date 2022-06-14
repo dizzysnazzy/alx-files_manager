@@ -19,6 +19,7 @@ const userQueue = new Queue('email sending');
  */
 const generateThumbnail = async (filePath, size) => {
   const buffer = await imgThumbnail(filePath, { width: size });
+  console.log(`Generating file: ${filePath}, size: ${size}`);
   return writeFileAsync(`${filePath}_${size}`, buffer);
 };
 
@@ -32,10 +33,11 @@ fileQueue.process(async (job, done) => {
   if (!userId) {
     throw new Error('Missing userId');
   }
+  console.log('Processing', job.data.name || '');
   const file = await (await dbClient.filesCollection())
     .findOne({
       _id: new mongoDBCore.BSON.ObjectId(fileId),
-      userId,
+      userId: new mongoDBCore.BSON.ObjectId(userId),
     });
   if (!file) {
     throw new Error('File not found');

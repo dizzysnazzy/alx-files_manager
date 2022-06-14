@@ -5,7 +5,7 @@ import { promisify } from 'util';
 import Queue from 'bull/lib/queue';
 import { v4 as uuidv4 } from 'uuid';
 import {
-  mkdir, writeFile, stat, realpath,
+  mkdir, writeFile, stat, existsSync, realpath,
 } from 'fs';
 import { join as joinPath } from 'path';
 import { Request, Response } from 'express';
@@ -77,7 +77,7 @@ export default class FilesController {
       res.status(400).json({ error: 'Missing data' });
       return;
     }
-    if (parentId !== ROOT_FOLDER_ID) {
+    if ((parentId !== ROOT_FOLDER_ID) && (parentId !== ROOT_FOLDER_ID.toString())) {
       const file = await (await dbClient.filesCollection())
         .findOne({
           _id: new mongoDBCore.BSON.ObjectId(isValidId(parentId) ? parentId : NULL_ID),
@@ -103,7 +103,9 @@ export default class FilesController {
       name,
       type,
       isPublic,
-      parentId: parentId === ROOT_FOLDER_ID ? '0' : new mongoDBCore.BSON.ObjectId(parentId),
+      parentId: (parentId === ROOT_FOLDER_ID) || (parentId === ROOT_FOLDER_ID.toString())
+        ? '0'
+        : new mongoDBCore.BSON.ObjectId(parentId),
     };
     await mkDirAsync(baseDir, { recursive: true });
     if (type !== VALID_FILE_TYPES.folder) {
@@ -117,7 +119,7 @@ export default class FilesController {
     // start thumbnail generation worker
     if (type === VALID_FILE_TYPES.image) {
       const jobName = `Image thumbnail [${userId}-${fileId}]`;
-      fileQueue.add(jobName, { userId, fileId });
+      fileQueue.add({ userId, fileId, name: jobName });
     }
     res.status(201).json({
       id: fileId,
@@ -125,7 +127,9 @@ export default class FilesController {
       name,
       type,
       isPublic,
-      parentId,
+      parentId: (parentId === ROOT_FOLDER_ID) || (parentId === ROOT_FOLDER_ID.toString())
+        ? 0
+        : parentId,
     });
   }
 
@@ -162,13 +166,11 @@ export default class FilesController {
    */
   static async getIndex(req, res) {
     const { user } = req;
-    const parentId = req.query
-      ? req.query.parentId || ROOT_FOLDER_ID.toString()
-      : ROOT_FOLDER_ID.toString();
-    const page = req.query ? Number.parseInt(req.query.page || 0, 10) : 0;
-    const userId = user._id.toString();
+    const parentId = req.query.parentId || ROOT_FOLDER_ID.toString();
+    const page = /\d+/.test((req.query.page || '').toString())
+      ? Number.parseInt(req.query.page, 10)
+      : 0;
     const filesFilter = {
-      userId: new mongoDBCore.BSON.ObjectId(userId),
       parentId: parentId === ROOT_FOLDER_ID.toString()
         ? parentId
         : new mongoDBCore.BSON.ObjectId(isValidId(parentId) ? parentId : NULL_ID),
@@ -179,18 +181,21 @@ export default class FilesController {
         { $match: filesFilter },
         { $skip: page * MAX_FILES_PER_PAGE },
         { $limit: MAX_FILES_PER_PAGE },
+        {
+          $project: {
+            _id: 0,
+            id: '$_id',
+            userId: '$userId',
+            name: '$name',
+            type: '$type',
+            isPublic: '$isPublic',
+            parentId: {
+              $cond: { if: { $eq: ['$parentId', '0'] }, then: 0, else: '$parentId' },
+            },
+          },
+        },
       ])).toArray();
-    const pageFiles = files.map((file) => ({
-      id: file._id.toString(),
-      userId: file.userId.toString(),
-      name: file.name,
-      type: file.type,
-      isPublic: file.isPublic,
-      parentId: file.parentId === ROOT_FOLDER_ID.toString()
-        ? 0
-        : file.parentId.toString(),
-    }));
-    res.status(200).json(pageFiles);
+    res.status(200).json(files);
   }
 
   static async putPublish(req, res) {
@@ -279,8 +284,13 @@ export default class FilesController {
     if (size) {
       filePath = `${file.localPath}_${size}`;
     }
-    const fileInfo = await statAsync(filePath);
-    if (!fileInfo.isFile()) {
+    if (existsSync(filePath)) {
+      const fileInfo = await statAsync(filePath);
+      if (!fileInfo.isFile()) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+    } else {
       res.status(404).json({ error: 'Not found' });
       return;
     }
